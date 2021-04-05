@@ -539,7 +539,7 @@ void CACHE::print_roi_stats(uint32_t cpu, CACHE *cache)
     TOTAL_INSTRUCTIONS = ooo_cpu[cpu].num_retired;
     TOTAL_CYCLES = current_core_cycle[cpu];
     // CSV output 
-    /*cout << "ARAMAGIC" <<
+    cout << "ARAMAGIC" <<
         "," << TOTAL_ACCESS << 
         "," << TOTAL_HIT << 
         "," << TOTAL_MISS << 
@@ -549,7 +549,7 @@ void CACHE::print_roi_stats(uint32_t cpu, CACHE *cache)
         "," << cache->pf_issued << 
         "," << cache->pf_useful << 
         "," << cache->pf_useless << 
-        endl;*/
+        endl;
 
     /* put fine grained access aside
     cout << " LOAD      ACCESS: " << setw(10) << cache->roi_access[cpu][0] << "  HIT: " << setw(10) << cache->roi_hit[cpu][0] << "  MISS: " << setw(10) << cache->roi_miss[cpu][0] << endl;
@@ -1444,7 +1444,6 @@ int CACHE::add_wq(PACKET *packet)
 int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int pf_fill_level, uint32_t prefetch_metadata)
 {
     if(!prefetch_warmup_complete) {
-        // cout << "STILL WARMUP " << prefetch_warmup_complete << endl;
         return 0;
     }
 
@@ -1479,12 +1478,9 @@ int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int 
             add_pq(&pf_packet);
 
             pf_issued++;
-            cout << "ISSUED: " << pf_issued << endl;
             return 1;
         }
-        cout << "PAGE INVALID" << endl;
     }
-    cout << "OCCUPANCY MORE THAN SIZE" << endl;
 
     return 0;
 }
