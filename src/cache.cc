@@ -1,7 +1,11 @@
 #include "cache.h"
 #include "set.h"
 
+#include "uncore.h"
+#include "ooo_cpu.h"
+
 uint64_t l2pf_access = 0;
+extern O3_CPU ooo_cpu[NUM_CPUS];
 
 void CACHE::handle_fill()
 {
@@ -521,12 +525,63 @@ void CACHE::handle_writeback()
     }
 }
 
-void CACHE::handle_read()
+void CACHE::print_roi_stats(uint32_t cpu, CACHE *cache)
 {
+
+    uint64_t TOTAL_ACCESS = 0, TOTAL_HIT = 0, TOTAL_MISS = 0, TOTAL_INSTRUCTIONS = 0, TOTAL_CYCLES = 0;
+
+    for (uint32_t i=0; i<NUM_TYPES; i++) {
+        TOTAL_ACCESS += cache->sim_access[cpu][i];
+        TOTAL_HIT += cache->sim_hit[cpu][i];
+        TOTAL_MISS += cache->sim_miss[cpu][i];
+    }
+
+    TOTAL_INSTRUCTIONS = ooo_cpu[cpu].num_retired;
+    TOTAL_CYCLES = current_core_cycle[cpu];
+    // CSV output 
+    /*cout << "ARAMAGIC" <<
+        "," << TOTAL_ACCESS << 
+        "," << TOTAL_HIT << 
+        "," << TOTAL_MISS << 
+        "," << TOTAL_INSTRUCTIONS << 
+        "," << TOTAL_CYCLES << 
+        "," << cache->pf_requested << 
+        "," << cache->pf_issued << 
+        "," << cache->pf_useful << 
+        "," << cache->pf_useless << 
+        endl;*/
+
+    /* put fine grained access aside
+    cout << " LOAD      ACCESS: " << setw(10) << cache->roi_access[cpu][0] << "  HIT: " << setw(10) << cache->roi_hit[cpu][0] << "  MISS: " << setw(10) << cache->roi_miss[cpu][0] << endl;
+
+    cout << cache->NAME;
+    cout << " RFO       ACCESS: " << setw(10) << cache->roi_access[cpu][1] << "  HIT: " << setw(10) << cache->roi_hit[cpu][1] << "  MISS: " << setw(10) << cache->roi_miss[cpu][1] << endl;
+
+    cout << cache->NAME;
+    cout << " PREFETCH  ACCESS: " << setw(10) << cache->roi_access[cpu][2] << "  HIT: " << setw(10) << cache->roi_hit[cpu][2] << "  MISS: " << setw(10) << cache->roi_miss[cpu][2] << endl;
+
+    cout << cache->NAME;
+    cout << " WRITEBACK ACCESS: " << setw(10) << cache->roi_access[cpu][3] << "  HIT: " << setw(10) << cache->roi_hit[cpu][3] << "  MISS: " << setw(10) << cache->roi_miss[cpu][3] << endl;
+
+    */
+    /* put average miss latency aside
+    cout << " AVERAGE MISS LATENCY: " << (1.0*(cache->total_miss_latency))/TOTAL_MISS << " cycles" << endl;
+    */
+}
+
+void CACHE::handle_read()
+{    
     // handle read
     for (uint32_t i=0; i<MAX_READ; i++) {
 
       uint32_t read_cpu = RQ.entry[RQ.head].cpu;
+      
+      if (RQ.entry[RQ.head].instr_id % 10000 == 1) {
+          for (uint32_t i=0; i<NUM_CPUS; i++) {
+              print_roi_stats(i, &uncore.LLC);
+          }
+      }
+      
       if (read_cpu == NUM_CPUS)
         return;
 
@@ -1388,8 +1443,10 @@ int CACHE::add_wq(PACKET *packet)
 
 int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int pf_fill_level, uint32_t prefetch_metadata)
 {
-    if(!prefetch_warmup_complete)
+    if(!prefetch_warmup_complete) {
+        // cout << "STILL WARMUP " << prefetch_warmup_complete << endl;
         return 0;
+    }
 
     pf_requested++;
 
@@ -1422,10 +1479,12 @@ int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int 
             add_pq(&pf_packet);
 
             pf_issued++;
-
+            cout << "ISSUED: " << pf_issued << endl;
             return 1;
         }
+        cout << "PAGE INVALID" << endl;
     }
+    cout << "OCCUPANCY MORE THAN SIZE" << endl;
 
     return 0;
 }

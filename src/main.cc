@@ -911,6 +911,7 @@ int main(int argc, char** argv)
             }
             if ((prefetch_warmup_complete == 0) && (ooo_cpu[i].num_retired > prefetch_warmup_instructions))
             {
+                cout << "SETTING prefetch_warmup_complete to 1" << endl;
                 prefetch_warmup_complete = 1;
                 all_prefetch_warmup_complete++;
             }

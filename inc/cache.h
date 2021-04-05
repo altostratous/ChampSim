@@ -188,6 +188,8 @@ class CACHE : public MEMORY {
          handle_read(),
          handle_prefetch();
 
+    void print_roi_stats(uint32_t cpu, CACHE *cache);
+
     void add_mshr(PACKET *packet),
          update_fill_cycle(),
          llc_initialize_replacement(),

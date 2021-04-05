@@ -14,7 +14,9 @@ uint32_t CACHE::llc_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache
     vector<uint64_t> sisb_candidates;
     sisb_prefetcher_operate(addr, ip, cache_hit, type, DEGREE, sisb_candidates);
     for(uint32_t i=0; i<sisb_candidates.size(); i++)
+    {
         prefetch_line(ip, addr, sisb_candidates[i], FILL_LLC, 0);
+    }
     return metadata_in;
 }
 
