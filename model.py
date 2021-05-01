@@ -1,4 +1,29 @@
 from abc import ABC, abstractmethod
+from collections import defaultdict
+
+import torch
+import torch.nn as nn
+
+
+class CNN(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.feature = nn.Sequential(
+            nn.Conv1d(1, 8, 8),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(8, 8, 8),
+            nn.ReLU(inplace=True),
+        )
+        self.decoder = nn.Sequential(
+            nn.Dropout(),
+            nn.Linear(8 * 50, 64),
+        )
+        self.softmax = nn.Softmax()
+
+    def forward(self, input):
+        return self.softmax(self.decoder(self.feature(input).view(-1, 50 * 8)))
+
 
 class MLPrefetchModel(object):
     '''
@@ -51,6 +76,7 @@ class MLPrefetchModel(object):
         '''
         pass
 
+
 class NextLineModel(MLPrefetchModel):
 
     def load(self, path):
@@ -89,24 +115,6 @@ class NextLineModel(MLPrefetchModel):
 
         return prefetches
 
-'''
-# Example PyTorch Model
-import torch
-import torch.nn as nn
-
-class PytorchMLModel(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        # Initialize your neural network here
-        # For example
-        self.embedding = nn.Embedding(...)
-        self.fc = nn.Linear(...)
-
-    def forward(self, x):
-        # Forward pass for your model here
-        # For example
-        return self.relu(self.fc(self.embedding(x)))
 
 class TerribleMLModel(MLPrefetchModel):
     """
@@ -120,47 +128,108 @@ class TerribleMLModel(MLPrefetchModel):
     script. Happy coding / researching! :)
     """
 
+    degree = 2
+    k = 4
+    history = 4
+    lookahead = 16
+    window = history + lookahead + k
+    filter_window = lookahead * degree
+    batch_size = 128
+
     def __init__(self):
-        self.model = PytorchMLModel()
-    
+        self.model = CNN()
+
     def load(self, path):
-        self.model = torch.load_state_dict(torch.load(path))
+        self.model.load_state_dict(torch.load(path))
 
     def save(self, path):
         torch.save(self.model.state_dict(), path)
 
+    def batch(self, data, batch_size=None):
+        if batch_size is None:
+            batch_size = self.batch_size
+        page_data = defaultdict(list)
+        batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
+        for line in data:
+            instr_id, cycles, load_address, ip, hit = line
+            block = load_address >> 6
+            page = load_address >> 6
+            page_buffer = page_data[page]
+            page_buffer.append(block)
+            batch_instr_id.append(instr_id)
+            batch_page.append(page)
+            batch_x.append(self.represent(page_buffer[:self.history]))
+            batch_y.append(self.represent(page_buffer[-self.k:]))
+            if len(page_buffer) > self.window:
+                page_buffer.pop(0)
+            if len(batch_x) == batch_size:
+                if torch.cuda.is_available():
+                    yield batch_instr_id, batch_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
+                else:
+                    yield batch_instr_id, batch_page, torch.Tensor(batch_x), torch.Tensor(batch_y)
+                batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
+
     def train(self, data):
-        # Just standard run-time here
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.07)
+        # defining the loss function
+        # criterion = nn.CrossEntropyLoss()
+        criterion = nn.BCELoss()
+        # checking if GPU is available
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+            criterion = criterion.cuda()
+        # converting the data into GPU format
         self.model.train()
-        criterion = nn.CrossEntropyLoss()
-        optimizer = nn.optim.Adam(self.model.parameters())
-        scheduler = nn.optim.lr_scheduler.StepLR(optimizer, step_size=0.1)
-        for epoch in range(20):
-            # Assuming batch(...) is a generator over the data
-            for i, (x, y) in enumerate(batch(data)):
-                y_pred = self.model(x)
-                loss = criterion(y_pred, y)
 
-                if i % 100 == 0:
-                    print('Loss:', loss.item())
+        def accuracy(output, label):
+            return torch.sum(
+                torch.logical_and(
+                    torch.scatter(
+                        torch.zeros(output.shape), 1, torch.topk(output, self.k).indices, 1
+                    ),
+                    label
+                )
+            ) / label.shape[0] / self.degree
 
+        for epoch in range(10):
+            for instr_id, page, x_train, y_train in self.batch(data):
+                # clearing the Gradients of the model parameters
                 optimizer.zero_grad()
-                loss.backward()
+
+                # prediction for training and validation set
+                output_train = self.model(x_train)
+
+                # computing the training and validation loss
+                loss_train = criterion(output_train, y_train)
+                acc = accuracy(output_train, y_train)
+                print('Acc {}: {}'.format(epoch, acc))
+
+                # computing the updated weights of all the model parameters
+                loss_train.backward()
                 optimizer.step()
-            scheduler.step()
+                tr_loss = loss_train.item()
+                print('Epoch : ', epoch + 1, '\t', 'loss :', tr_loss)
 
     def generate(self, data):
         self.model.eval()
         prefetches = []
-        for i, (x, _) in enumerate(batch(data, random=False)):
+        for (instr_id,), (page,), x, y in enumerate(self.batch(data, batch_size=1)):
             y_pred = self.model(x)
-            
-            for xi, yi in zip(x, y_pred):
-                # Where instr_id is a function that extracts the unique instr_id
-                prefetches.append((instr_id(xi), yi))
-
+            fltr = torch.Tensor(self.represent(prefetches[-self.filter_window:]))
+            if torch.cuda.is_available():
+                fltr = fltr.cuda()
+            for block in torch.sort((1. * (not fltr)) * y_pred[0], descending=True).indices[:self.degree]:
+                prefetches.append((instr_id, block << 6 + page << 12))
         return prefetches
-'''
+
+    def represent(self, addresses):
+        blocks = [(address >> 6) % 64 for address in addresses]
+        raw = [0 for _ in range(64)]
+        for block in blocks:
+            raw[block] = 1
+        return raw
+
 
 # Replace this if you create your own model
-Model = NextLineModel
+Model = TerribleMLModel
+

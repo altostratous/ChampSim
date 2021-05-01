@@ -185,8 +185,8 @@ def run_command():
     parser.add_argument('--prefetch', default=None)
     parser.add_argument('--no-base', default=False, action='store_true')
     parser.add_argument('--results-dir', default=default_results_dir)
-    parser.add_argument('--num-instructions', default=None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
-    parser.add_argument('--num-prefetch-warmup-instructions', default=default_warmup_instrs)
+    parser.add_argument('--num-instructions', type=int, default=None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
+    parser.add_argument('--num-prefetch-warmup-instructions', type=int, default=default_warmup_instrs)
     parser.add_argument('--seed-file', default=default_seed_file)
 
     args = parser.parse_args(sys.argv[2:])
@@ -370,10 +370,12 @@ def read_load_trace_data(load_trace, num_prefetch_warmup_instructions):
 
     train_data = []
     eval_data = []
-    with open(load_trace, 'r') as f:
+    import lzma
+    with lzma.open(load_trace, mode='rt') as f:
         for line in f:
             pline = process_line(line)
-            if pline[0] < num_prefetch_warmup_instructions * 1000000:
+            # breakpoint()
+            if pline[0] < int(num_prefetch_warmup_instructions) * 1000000:
                 train_data.append(pline)
             else:
                 eval_data.append(pline)
@@ -416,7 +418,7 @@ def generate_command():
     parser.add_argument('load_trace', default=None)
     parser.add_argument('prefetch_file', default=None)
     parser.add_argument('--model', default=None, required=True)
-    parser.add_argument('--num-prefetch-warmup-instructions', default=default_warmup_instrs)
+    parser.add_argument('--num-prefetch-warmup-instructions', type=int, default=default_warmup_instrs)
 
     args = parser.parse_args(sys.argv[2:])
 
