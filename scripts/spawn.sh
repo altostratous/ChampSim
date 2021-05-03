@@ -1,5 +1,6 @@
 #!/bin/bash
 
+mkdir -p generated
 for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; do
     if [[ $b != "gap" ]]; then continue; fi
     TRACE_PATH=ML-DPC/ChampSimTraces/$b/$t;
