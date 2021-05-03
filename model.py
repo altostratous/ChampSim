@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
+import os
 
 import torch
 import torch.nn as nn
@@ -131,7 +132,8 @@ class TerribleMLModel(MLPrefetchModel):
     degree = 2
     k = 2
     history = 4
-    lookahead = 20
+    lookahead = int(os.environ.get('LOOKAHEAD', '0'))
+    bucket = int(os.environ.get('BUCKET', 'page'))
     window = history + lookahead + k
     filter_window = lookahead * degree
     batch_size = 4096
@@ -153,7 +155,7 @@ class TerribleMLModel(MLPrefetchModel):
         for line in data:
             instr_id, cycles, load_address, ip, hit = line
             page = load_address >> 12
-            bucket_buffer = bucket_data[ip]
+            bucket_buffer = bucket_data[eval(self.bucket)]
             bucket_buffer.append(load_address)
             batch_instr_id.append(instr_id)
             batch_page.append(page)
@@ -168,7 +170,18 @@ class TerribleMLModel(MLPrefetchModel):
                     yield batch_instr_id, batch_page, torch.Tensor(batch_x), torch.Tensor(batch_y)
                 batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
 
+    def accuracy(self, output, label):
+        return torch.sum(
+            torch.logical_and(
+                torch.scatter(
+                    torch.zeros(output.shape, device=output.device), 1, torch.topk(output, self.k).indices, 1
+                ),
+                label
+            )
+        ) / label.shape[0] / self.k
+
     def train(self, data):
+        print('LOOKAHEAD =', self.lookahead)
         optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
         # defining the loss function
         # criterion = nn.CrossEntropyLoss()
@@ -180,17 +193,7 @@ class TerribleMLModel(MLPrefetchModel):
         # converting the data into GPU format
         self.model.train()
 
-        def accuracy(output, label):
-            return torch.sum(
-                torch.logical_and(
-                    torch.scatter(
-                        torch.zeros(output.shape, device=output.device), 1, torch.topk(output, self.k).indices, 1
-                    ),
-                    label
-                )
-            ) / label.shape[0] / self.k
-
-        for epoch in range(25):
+        for epoch in range(20):
             accs = []
             losses = []
             percent = len(data) // self.batch_size // 100
@@ -203,7 +206,7 @@ class TerribleMLModel(MLPrefetchModel):
 
                 # computing the training and validation loss
                 loss_train = criterion(output_train, y_train)
-                acc = accuracy(output_train, y_train)
+                acc = self.accuracy(output_train, y_train)
                 # print('Acc {}: {}'.format(epoch, acc))
 
                 # computing the updated weights of all the model parameters
@@ -220,11 +223,13 @@ class TerribleMLModel(MLPrefetchModel):
     def generate(self, data):
         self.model.eval()
         prefetches = []
+        accs = []
         for i, (instr_ids, pages, x, y) in enumerate(self.batch(data)):
             # breakpoint()
             pages = torch.LongTensor(pages).to(x.device)
             instr_ids = torch.LongTensor(instr_ids).to(x.device)
             y_preds = self.model(x)
+            accs.append(float(self.accuracy(y_preds, y)))
             topk = torch.topk(y_preds, self.degree).indices
             shape = (topk.shape[0] * self.degree, )
             topk = topk.reshape(shape)
@@ -233,7 +238,7 @@ class TerribleMLModel(MLPrefetchModel):
             addresses = (pages << 12) + (topk << 6)
             prefetches.extend(zip(map(int, instr_ids), map(int, addresses)))
             if i % 100 == 0:
-                print(i)
+                print('Chunk', i, 'Accuracy', sum(accs) / len(accs))
         return prefetches
 
     def represent(self, addresses, box=True):
