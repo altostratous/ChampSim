@@ -17,6 +17,7 @@ for b in `ls ML-DPC/$TRACE_TYPE`; do for t in `ls ML-DPC/$TRACE_TYPE/$b`; do
                     echo sbatch --export=ALL --mem 1G --time 3:00:00 scripts/single.sh ./ml_prefetch_sim.py run $TRACE_PATH --num-prefetch-warmup-instructions 100 --num-instructions 100 --results-dir="results-$bucket-$lookahead" --no-base --prefetch $PREFETCH_FILE
                 else
                     echo sbatch --export=ALL --mem 1G --time 3:00:00 scripts/single.sh ./ml_prefetch_sim.py train $TRACE_PATH --num-prefetch-warmup-instructions 100 --num-instructions 100 --generate $PREFETCH_FILE
+                fi
             done
         done
     # fi
