@@ -129,12 +129,12 @@ class TerribleMLModel(MLPrefetchModel):
     """
 
     degree = 2
-    k = 4
+    k = 2
     history = 4
-    lookahead = 16
+    lookahead = 20
     window = history + lookahead + k
     filter_window = lookahead * degree
-    batch_size = 128
+    batch_size = 4096
 
     def __init__(self):
         self.model = CNN()
@@ -148,20 +148,19 @@ class TerribleMLModel(MLPrefetchModel):
     def batch(self, data, batch_size=None):
         if batch_size is None:
             batch_size = self.batch_size
-        page_data = defaultdict(list)
+        bucket_data = defaultdict(list)
         batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
         for line in data:
             instr_id, cycles, load_address, ip, hit = line
-            block = load_address >> 6
-            page = load_address >> 6
-            page_buffer = page_data[page]
-            page_buffer.append(block)
+            page = load_address >> 12
+            bucket_buffer = bucket_data[ip]
+            bucket_buffer.append(load_address)
             batch_instr_id.append(instr_id)
             batch_page.append(page)
-            batch_x.append(self.represent(page_buffer[:self.history]))
-            batch_y.append(self.represent(page_buffer[-self.k:]))
-            if len(page_buffer) > self.window:
-                page_buffer.pop(0)
+            batch_x.append(self.represent(bucket_buffer[:self.history]))
+            batch_y.append(self.represent(bucket_buffer[-self.k:], box=False))
+            if len(bucket_buffer) > self.window:
+                bucket_buffer.pop(0)
             if len(batch_x) == batch_size:
                 if torch.cuda.is_available():
                     yield batch_instr_id, batch_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
@@ -170,7 +169,7 @@ class TerribleMLModel(MLPrefetchModel):
                 batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
 
     def train(self, data):
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.07)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
         # defining the loss function
         # criterion = nn.CrossEntropyLoss()
         criterion = nn.BCELoss()
@@ -185,14 +184,17 @@ class TerribleMLModel(MLPrefetchModel):
             return torch.sum(
                 torch.logical_and(
                     torch.scatter(
-                        torch.zeros(output.shape), 1, torch.topk(output, self.k).indices, 1
+                        torch.zeros(output.shape, device=output.device), 1, torch.topk(output, self.k).indices, 1
                     ),
                     label
                 )
-            ) / label.shape[0] / self.degree
+            ) / label.shape[0] / self.k
 
-        for epoch in range(10):
-            for instr_id, page, x_train, y_train in self.batch(data):
+        for epoch in range(25):
+            accs = []
+            losses = []
+            percent = len(data) // self.batch_size // 100
+            for i, (instr_id, page, x_train, y_train) in enumerate(self.batch(data)):
                 # clearing the Gradients of the model parameters
                 optimizer.zero_grad()
 
@@ -202,32 +204,47 @@ class TerribleMLModel(MLPrefetchModel):
                 # computing the training and validation loss
                 loss_train = criterion(output_train, y_train)
                 acc = accuracy(output_train, y_train)
-                print('Acc {}: {}'.format(epoch, acc))
+                # print('Acc {}: {}'.format(epoch, acc))
 
                 # computing the updated weights of all the model parameters
                 loss_train.backward()
                 optimizer.step()
                 tr_loss = loss_train.item()
-                print('Epoch : ', epoch + 1, '\t', 'loss :', tr_loss)
+                accs.append(float(acc))
+                losses.append(float(tr_loss))
+                if i % percent == 0:
+                    print('.', end='')
+            print('Acc {}: {}'.format(epoch, sum(accs) / len(accs)))
+            print('Epoch : ', epoch + 1, '\t', 'loss :', sum(losses))
 
     def generate(self, data):
         self.model.eval()
         prefetches = []
-        for (instr_id,), (page,), x, y in enumerate(self.batch(data, batch_size=1)):
-            y_pred = self.model(x)
-            fltr = torch.Tensor(self.represent(prefetches[-self.filter_window:]))
-            if torch.cuda.is_available():
-                fltr = fltr.cuda()
-            for block in torch.sort((1. * (not fltr)) * y_pred[0], descending=True).indices[:self.degree]:
-                prefetches.append((instr_id, block << 6 + page << 12))
+        for i, (instr_ids, pages, x, y) in enumerate(self.batch(data)):
+            # breakpoint()
+            pages = torch.LongTensor(pages).to(x.device)
+            instr_ids = torch.LongTensor(instr_ids).to(x.device)
+            y_preds = self.model(x)
+            topk = torch.topk(y_preds, self.degree).indices
+            shape = (topk.shape[0] * self.degree, )
+            topk = topk.reshape(shape)
+            pages = torch.repeat_interleave(pages, self.degree)
+            instr_ids = torch.repeat_interleave(instr_ids, self.degree)
+            addresses = (pages << 12) + (topk << 6)
+            prefetches.extend(zip(map(int, instr_ids), map(int, addresses)))
+            if i % 100 == 0:
+                print(i)
         return prefetches
 
-    def represent(self, addresses):
+    def represent(self, addresses, box=True):
         blocks = [(address >> 6) % 64 for address in addresses]
         raw = [0 for _ in range(64)]
         for block in blocks:
             raw[block] = 1
-        return raw
+        if box:
+            return [raw]
+        else:
+            return raw
 
 
 # Replace this if you create your own model
