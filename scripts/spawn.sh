@@ -1,7 +1,7 @@
 #!/bin/bash
 
-$TRACE_TYPE='ChampSimTraces'
-$ML_COMMAND=train
+TRACE_TYPE='ChampSimTraces'
+ML_COMMAND=train
 
 mkdir -p generated
 for b in `ls ML-DPC/$TRACE_TYPE`; do for t in `ls ML-DPC/$TRACE_TYPE/$b`; do
