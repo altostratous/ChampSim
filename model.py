@@ -133,7 +133,7 @@ class TerribleMLModel(MLPrefetchModel):
     k = 2
     history = 4
     lookahead = int(os.environ.get('LOOKAHEAD', '0'))
-    bucket = int(os.environ.get('BUCKET', 'page'))
+    bucket = os.environ.get('BUCKET', 'page')
     window = history + lookahead + k
     filter_window = lookahead * degree
     batch_size = 4096
@@ -182,6 +182,7 @@ class TerribleMLModel(MLPrefetchModel):
 
     def train(self, data):
         print('LOOKAHEAD =', self.lookahead)
+        print('BUCKET =', self.bucket)
         optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
         # defining the loss function
         # criterion = nn.CrossEntropyLoss()
