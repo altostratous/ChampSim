@@ -1,9 +1,47 @@
+import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
 import os
 
 import torch
 import torch.nn as nn
+
+
+class CacheSimulator(object):
+
+    def __init__(self, sets, ways, block_size) -> None:
+        super().__init__()
+        self.ways = ways
+        self.way_shift = int(math.log2(ways))
+        self.sets = sets
+        self.block_size = block_size
+        self.block_shift = int(math.log2(block_size))
+        self.storage = defaultdict(list)
+        self.label_storage = defaultdict(list)
+
+    def parse_address(self, address):
+        block = address >> self.block_shift
+        way = block % self.ways
+        tag = block >> self.way_shift
+        return way, tag
+
+    def load(self, address, label=None):
+        way, tag = self.parse_address(address)
+        hit, l = self.check(address)
+        if not hit:
+            self.storage[way].append(tag)
+            self.label_storage[way].append(label)
+            if len(self.storage[way]) > self.sets:
+                self.storage[way].pop(0)
+                self.label_storage[way].pop(0)
+        return hit, l
+
+    def check(self, address):
+        way, tag = self.parse_address(address)
+        if tag in self.storage[way]:
+            return True, self.label_storage[way][self.storage[way].index(tag)]
+        else:
+            return False, None
 
 
 class CNN(nn.Module):
@@ -114,6 +152,131 @@ class NextLineModel(MLPrefetchModel):
             prefetches.append((instr_id, ((load_addr >> 6) + 1) << 12))
             prefetches.append((instr_id, ((load_addr >> 6) + 2) << 12))
 
+        return prefetches
+
+
+class BestOffset(MLPrefetchModel):
+    offsets = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7, 8, -8, 9, -9, 10, -10, 11, -11, 12, -12, 13, -13, 14,
+               -14, 15, -15, 16, -16, 18, -18, 20, -20, 24, -24, 30, -30, 32, -32, 36, -36, 40, -40]
+    scores = [0 for _ in range(len(offsets))]
+    round = 0
+    best_index = 0
+    second_best_index = 0
+    best_index_score = 0
+    temp_best_index = 0
+    bad_score = 10
+    low_score = 20
+    max_score = 31
+    max_round = 100
+    llc = CacheSimulator(16, 2048, 64)
+    rr = {}
+    dq = []
+    active_offsets = set()
+    p = 0
+
+    def load(self, path):
+        # Load your pytorch / tensorflow model from the given filepath
+        print('Loading ' + path + ' for BestOffset')
+
+    def save(self, path):
+        # Save your model to a file
+        print('Saving ' + path + ' for BestOffset')
+
+    def train(self, data):
+        '''
+        Train your model here using the data
+
+        The data is the same format given in the load traces. Namely:
+        Unique Instr Id, Cycle Count, Load Address, Instruction Pointer of the Load, LLC hit/miss
+        '''
+        print('Training BestOffset')
+
+    def rr_hash(self, address):
+        return (address >> 6) % 128
+
+    def rr_add(self, cycles, address):
+        self.dq.append((cycles, address))
+
+    def rr_pop(self, current_cycles):
+        while self.dq:
+            cycles, address = self.dq[0]
+            if cycles < current_cycles - 15:
+                self.rr[self.rr_hash(address)] = address
+                self.dq.pop(0)
+            else:
+                break
+
+    def rr_hit(self, address):
+        return self.rr.get(self.rr_hash(address)) == address
+
+    def reset_bo(self):
+        self.temp_best_index = -1
+        self.scores = [0 for _ in range(len(self.offsets))]
+        self.p = 0
+        self.round = 0
+
+    def train_bo(self, address):
+        testoffset = self.offsets[self.p]
+        testlineaddr = address - testoffset
+
+        if address >> 6 == testlineaddr >> 6 and self.rr_hit(testlineaddr):
+            self.scores[self.p] += 1
+            if self.scores[self.p] >= self.scores[self.temp_best_index]:
+                self.temp_best_index = self.p
+
+        if self.p == len(self.scores) - 1:
+            self.round += 1
+            if self.scores[self.temp_best_index] == self.max_score or self.round == self.max_round:
+                self.best_index = self.temp_best_index if self.temp_best_index != -1 else 1
+                self.second_best_index = sorted([(s, i) for i, s in enumerate(self.scores)])[-2][1]
+                self.best_index_score = self.scores[self.best_index]
+                if self.best_index_score <= self.bad_score:
+                    self.best_index = -1
+                self.active_offsets.add(self.best_index)
+                self.reset_bo()
+                return
+        self.p += 1
+        self.p %= len(self.scores)
+
+    def generate(self, data):
+        '''
+        Generate the prefetches for the prefetch file for ChampSim here
+
+        As a reminder, no looking ahead in the data and no more than 2
+        prefetches per unique instruction ID
+
+        The return format for this function is a list of (instr_id, pf_addr)
+        tuples as shown below
+        '''
+        print('Generating for BestOffset')
+        prefetches = []
+        prefetch_requests = []
+        percent = len(data) // 100
+        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data):
+            # Prefetch the next two blocks
+            hit, prefetched = self.llc.load(load_addr, False)
+            latency = 400
+            while prefetch_requests and prefetch_requests[0][0] + latency < cycle_count:
+                self.llc.load(prefetch_requests[0][1], True)
+                prefetch_requests.pop(0)
+            self.rr_pop(cycle_count)
+            if not hit or prefetched:
+                line_addr = (load_addr >> 6)
+                self.train_bo(line_addr)
+                self.rr_add(cycle_count, line_addr)
+                if self.best_index != -1 and self.best_index_score > self.low_score:
+                    addr_1 = (line_addr + 1 * self.offsets[self.best_index]) << 6
+                    addr_2 = (line_addr + 2 * self.offsets[self.best_index]) << 6
+                    # addr_2 = (line_addr + 2 * self.offsets[self.second_best_index]) << 6
+                    prefetches.append((instr_id, addr_1))
+                    prefetches.append((instr_id, addr_2))
+                    prefetch_requests.append((cycle_count, addr_1))
+                    prefetch_requests.append((cycle_count, addr_2))
+            else:
+                pass
+            if i % percent == 0:
+                print(i // percent, self.active_offsets)
+                self.active_offsets.clear()
         return prefetches
 
 
@@ -232,7 +395,7 @@ class TerribleMLModel(MLPrefetchModel):
             y_preds = self.model(x)
             accs.append(float(self.accuracy(y_preds, y)))
             topk = torch.topk(y_preds, self.degree).indices
-            shape = (topk.shape[0] * self.degree, )
+            shape = (topk.shape[0] * self.degree,)
             topk = topk.reshape(shape)
             pages = torch.repeat_interleave(pages, self.degree)
             instr_ids = torch.repeat_interleave(instr_ids, self.degree)
@@ -254,5 +417,6 @@ class TerribleMLModel(MLPrefetchModel):
 
 
 # Replace this if you create your own model
-Model = TerribleMLModel
 
+ml_model_name = os.environ.get('ML_MODEL_NAME', 'TerribleMLModel')
+Model = eval(ml_model_name)
