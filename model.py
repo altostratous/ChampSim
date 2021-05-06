@@ -149,8 +149,8 @@ class NextLineModel(MLPrefetchModel):
         prefetches = []
         for (instr_id, cycle_count, load_addr, load_ip, llc_hit) in data:
             # Prefetch the next two blocks
-            prefetches.append((instr_id, ((load_addr >> 6) + 1) << 12))
-            prefetches.append((instr_id, ((load_addr >> 6) + 2) << 12))
+            prefetches.append((instr_id, ((load_addr >> 6) + 5) << 6))
+            prefetches.append((instr_id, ((load_addr >> 6) + 10) << 6))
 
         return prefetches
 
@@ -169,10 +169,13 @@ class BestOffset(MLPrefetchModel):
     max_score = 31
     max_round = 100
     llc = CacheSimulator(16, 2048, 64)
-    rr = {}
+    rrl = {}
+    rrr = {}
     dq = []
     active_offsets = set()
     p = 0
+    memory_latency = 200
+    rr_latency = 60
 
     def load(self, path):
         # Load your pytorch / tensorflow model from the given filepath
@@ -192,22 +195,30 @@ class BestOffset(MLPrefetchModel):
         print('Training BestOffset')
 
     def rr_hash(self, address):
-        return (address >> 6) % 128
+        return ((address >> 6) + address) % 64
 
     def rr_add(self, cycles, address):
         self.dq.append((cycles, address))
 
+    def rr_add_immediate(self, address, side='l'):
+        if side == 'l':
+            self.rrl[self.rr_hash(address)] = address
+        elif side == 'r':
+            self.rrr[self.rr_hash(address)] = address
+        else:
+            assert False
+
     def rr_pop(self, current_cycles):
         while self.dq:
             cycles, address = self.dq[0]
-            if cycles < current_cycles - 15:
-                self.rr[self.rr_hash(address)] = address
+            if cycles < current_cycles - self.rr_latency:
+                self.rr_add_immediate(address, side='r')
                 self.dq.pop(0)
             else:
                 break
 
     def rr_hit(self, address):
-        return self.rr.get(self.rr_hash(address)) == address
+        return self.rrr.get(self.rr_hash(address)) == address or self.rrl.get(self.rr_hash(address)) == address
 
     def reset_bo(self):
         self.temp_best_index = -1
@@ -255,9 +266,17 @@ class BestOffset(MLPrefetchModel):
         for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data):
             # Prefetch the next two blocks
             hit, prefetched = self.llc.load(load_addr, False)
-            latency = 400
-            while prefetch_requests and prefetch_requests[0][0] + latency < cycle_count:
-                self.llc.load(prefetch_requests[0][1], True)
+            while prefetch_requests and prefetch_requests[0][0] + self.memory_latency < cycle_count:
+                fill_addr = prefetch_requests[0][1]
+                h, p = self.llc.load(fill_addr, True)
+                if not h:
+                    if self.best_index == -1:
+                        fill_line_addr = fill_addr >> 6
+                        if self.best_index != -1:
+                            offset = self.offsets[self.best_index]
+                        else:
+                            offset = 0
+                        self.rr_add_immediate(fill_line_addr - offset)
                 prefetch_requests.pop(0)
             self.rr_pop(cycle_count)
             if not hit or prefetched:
