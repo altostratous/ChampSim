@@ -173,10 +173,12 @@ class BestOffset(MLPrefetchModel):
     rrr = {}
     dq = []
     acc = []
+    acc_alt = []
     active_offsets = set()
     p = 0
     memory_latency = 200
     rr_latency = 60
+    fuzzy = eval(os.environ.get('FUZZY_BO', 'False'))
 
     def load(self, path):
         # Load your pytorch / tensorflow model from the given filepath
@@ -226,7 +228,8 @@ class BestOffset(MLPrefetchModel):
         self.scores = [0 for _ in range(len(self.offsets))]
         self.p = 0
         self.round = 0
-        self.acc.clear()
+        # self.acc.clear()
+        # self.acc_alt.clear()
 
     def train_bo(self, address):
         testoffset = self.offsets[self.p]
@@ -287,9 +290,14 @@ class BestOffset(MLPrefetchModel):
                 self.rr_add(cycle_count, line_addr)
                 if self.best_index != -1 and self.best_index_score > self.low_score:
                     addr_1 = (line_addr + 1 * self.offsets[self.best_index]) << 6
-                    # addr_2 = (line_addr + 2 * self.offsets[self.best_index]) << 6
-                    addr_2 = (line_addr + 1 * self.offsets[self.second_best_index]) << 6
-                    self.acc.append(len({addr_2 >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 300])))
+                    addr_2 = (line_addr + 2 * self.offsets[self.best_index]) << 6
+                    addr_2_alt = (line_addr + 1 * self.offsets[self.second_best_index]) << 6
+                    acc = len({addr_2 >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 25]))
+                    self.acc.append(acc)
+                    acc_alt = len({addr_2_alt >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 25]))
+                    self.acc_alt.append(acc_alt)
+                    if acc_alt > acc:
+                        addr_2 = addr_2_alt
                     prefetches.append((instr_id, addr_1))
                     prefetches.append((instr_id, addr_2))
                     prefetch_requests.append((cycle_count, addr_1))
@@ -297,7 +305,11 @@ class BestOffset(MLPrefetchModel):
             else:
                 pass
             if i % percent == 0:
-                print(i // percent, self.active_offsets, self.best_index_score, sum(self.acc) / 2 / (len(self.acc) + 1))
+                print(i // percent, self.active_offsets, self.best_index_score,
+                      sum(self.acc) / 2 / (len(self.acc) + 1),
+                      sum(self.acc_alt) / 2 / (len(self.acc_alt) + 1))
+                self.acc.clear()
+                self.acc_alt.clear()
                 self.active_offsets.clear()
         return prefetches
 
