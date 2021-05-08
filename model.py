@@ -164,10 +164,11 @@ class BestOffset(MLPrefetchModel):
     second_best_index = 0
     best_index_score = 0
     temp_best_index = 0
-    bad_score = 10
-    low_score = 20
-    max_score = 31
-    max_round = 100
+    score_scale = eval(os.environ.get('BO_SCORE_SCALE', '1'))
+    bad_score = int(10 * score_scale)
+    low_score = int(20 * score_scale)
+    max_score = int(31 * score_scale)
+    max_round = int(100 * score_scale)
     llc = CacheSimulator(16, 2048, 64)
     rrl = {}
     rrr = {}
@@ -296,8 +297,8 @@ class BestOffset(MLPrefetchModel):
                     self.acc.append(acc)
                     acc_alt = len({addr_2_alt >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 25]))
                     self.acc_alt.append(acc_alt)
-                    if acc_alt > acc:
-                        addr_2 = addr_2_alt
+                    # if acc_alt > acc:
+                    #     addr_2 = addr_2_alt
                     prefetches.append((instr_id, addr_1))
                     prefetches.append((instr_id, addr_2))
                     prefetch_requests.append((cycle_count, addr_1))
