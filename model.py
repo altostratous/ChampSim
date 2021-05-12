@@ -172,7 +172,8 @@ class MementoModel(MLPrefetchModel):
 
     mapping = {}
     scores = defaultdict(int)
-    last_ip_access = {}
+    last_ip_access = defaultdict(list)
+    delay = 5
 
     def load(self, path):
         # Load your pytorch / tensorflow model from the given filepath
@@ -192,11 +193,13 @@ class MementoModel(MLPrefetchModel):
         print('Training NextLineModel')
 
         for (instr_id, cycle_count, load_addr, load_ip, llc_hit) in data:
-            if load_ip in self.last_ip_access:
-                key = load_ip, self.last_ip_access[load_ip]
-                self.mapping[key] = load_addr >> 6
+            if len(self.last_ip_access[load_ip]) >= self.delay:
+                key = load_ip, self.last_ip_access[load_ip][0]
+                self.mapping[key] = load_addr
                 self.scores[key] += 1
-            self.last_ip_access[load_ip] = load_addr >> 6
+            self.last_ip_access[load_ip].append(load_addr)
+            if len(self.last_ip_access[load_ip]) > self.delay:
+                self.last_ip_access[load_ip].pop(0)
 
     def generate(self, data):
         '''
@@ -212,9 +215,9 @@ class MementoModel(MLPrefetchModel):
         prefetches = []
         for (instr_id, cycle_count, load_addr, load_ip, llc_hit) in data:
             # Prefetch the next two blocks
-            key = load_ip, load_addr >> 6
+            key = load_ip, load_addr
             if key in self.mapping and self.scores[key] > 0:
-                prefetches.append((instr_id, self.mapping[key] >> 6))
+                prefetches.append((instr_id, self.mapping[key]))
 
         return prefetches
 
