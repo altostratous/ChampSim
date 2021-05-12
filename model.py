@@ -173,7 +173,7 @@ class MementoModel(MLPrefetchModel):
     mapping = {}
     scores = defaultdict(int)
     last_ip_access = defaultdict(list)
-    delay = 5
+    delay = eval(os.environ.get('MEMENTO_DELAY', '5'))
 
     def load(self, path):
         # Load your pytorch / tensorflow model from the given filepath
