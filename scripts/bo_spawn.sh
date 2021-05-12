@@ -7,7 +7,7 @@ for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; 
     export ML_MODEL_NAME=MementoModel
     export FUZZY_BO=True
     export BO_SCORE_SCALE=1
-    export MEMENTO_DELAY=0
+    export MEMENTO_DELAY=1
     GENERATED_DIR="generated-memento-$MEMENTO_DELAY"
     mkdir -p $GENERATED_DIR
     PREFETCH_FILE="$GENERATED_DIR/$b-$t-memento.txt"
