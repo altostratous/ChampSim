@@ -6,7 +6,7 @@ for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; 
     LOAD_TRACE_PATH=ML-DPC/LoadTraces/$b/`echo $t | sed 's/trace.xz/txt.xz/g' | sed 's/trace.gz/txt.xz/g'`;
     export ML_MODEL_NAME=MementoModel
     export FUZZY_BO=True
-    export BO_SCORE_SCALE=$scale
+    export BO_SCORE_SCALE=1
     export MEMENTO_DELAY=0
     GENERATED_DIR="generated-memento-$MEMENTO_DELAY"
     mkdir -p $GENERATED_DIR
