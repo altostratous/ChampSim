@@ -17,12 +17,12 @@ for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; 
       # --gres=gpu:p100:1
       TRAIN_COMMAND="sbatch --export=ALL --mem 10G --time 6:00:00 scripts/single.sh ./ml_prefetch_sim.py train $LOAD_TRACE_PATH --num-prefetch-warmup-instructions 100 --generate $PREFETCH_FILE"
       echo $TRAIN_COMMAND
-      JOB_ID=`echo $TRAIN_COMMAND`
+      JOB_ID=`$TRAIN_COMMAND`
       SUCCEEDED=$?
       if [[ $SUCCEEDED = 0 ]]; then
         JOB_ID=`echo $JOB_ID | awk '{print $4}'`
-        echo sbatch --dependency=afterok:$JOB_ID --export=ALL --mem 10G --time 6:00:00 scripts/single.sh ./ml_prefetch_sim.py run ML-DPC/ChampSimTraces/$b/$t --num-prefetch-warmup-instructions 100 --num-instructions 100 --results-dir="results-bo-ss$scale" --prefetch $PREFETCH_FILE --no-base
+        sbatch --dependency=afterok:$JOB_ID --export=ALL --mem 10G --time 6:00:00 scripts/single.sh ./ml_prefetch_sim.py run ML-DPC/ChampSimTraces/$b/$t --num-prefetch-warmup-instructions 100 --num-instructions 100 --results-dir="results-bo-ss$scale" --prefetch $PREFETCH_FILE --no-base
       fi
-      if [[ -f $TRACE_FILE_PATH ]] && [[ -f $LOAD_TRACE_FILE_PATH ]]; then echo OK; fi
+      if [[ -f $TRACE_PATH ]] && [[ -f $LOAD_TRACE_PATH ]]; then echo OK; fi
     done
 done; done
