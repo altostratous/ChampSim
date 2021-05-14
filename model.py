@@ -399,9 +399,10 @@ class TerribleMLModel(MLPrefetchModel):
     history = 4
     lookahead = int(os.environ.get('LOOKAHEAD', '0'))
     bucket = os.environ.get('BUCKET', 'page')
+    epochs = int(os.environ.get('EPOCHS', '10'))
     window = history + lookahead + k
     filter_window = lookahead * degree
-    batch_size = 4096
+    batch_size = 256
 
     def __init__(self):
         self.model = CNN()
@@ -416,18 +417,22 @@ class TerribleMLModel(MLPrefetchModel):
         if batch_size is None:
             batch_size = self.batch_size
         bucket_data = defaultdict(list)
+        bucket_instruction_ids = defaultdict(list)
         batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
         for line in data:
             instr_id, cycles, load_address, ip, hit = line
             page = load_address >> 12
-            bucket_buffer = bucket_data[eval(self.bucket)]
+            bucket_key = eval(self.bucket)
+            bucket_buffer = bucket_data[bucket_key]
             bucket_buffer.append(load_address)
-            batch_instr_id.append(instr_id)
-            batch_page.append(page)
-            batch_x.append(self.represent(bucket_buffer[:self.history]))
-            batch_y.append(self.represent(bucket_buffer[-self.k:], box=False))
+            bucket_instruction_ids[bucket_key].append(instr_id)
             if len(bucket_buffer) > self.window:
+                batch_page.append(bucket_buffer[self.history - 1] >> 12)
+                batch_x.append(self.represent(bucket_buffer[:self.history]))
+                batch_y.append(self.represent(bucket_buffer[-self.k:], box=False))
+                batch_instr_id.append(bucket_instruction_ids[bucket_key][self.history - 1])
                 bucket_buffer.pop(0)
+                bucket_instruction_ids[bucket_key].pop(0)
             if len(batch_x) == batch_size:
                 if torch.cuda.is_available():
                     yield batch_instr_id, batch_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
@@ -459,7 +464,7 @@ class TerribleMLModel(MLPrefetchModel):
         # converting the data into GPU format
         self.model.train()
 
-        for epoch in range(20):
+        for epoch in range(self.epochs):
             accs = []
             losses = []
             percent = len(data) // self.batch_size // 100
