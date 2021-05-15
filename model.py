@@ -174,6 +174,7 @@ class MementoModel(MLPrefetchModel):
     scores = defaultdict(int)
     last_ip_access = defaultdict(list)
     delay = eval(os.environ.get('MEMENTO_DELAY', '5'))
+    llc = CacheSimulator(16, 2048, 64)
 
     def load(self, path):
         # Load your pytorch / tensorflow model from the given filepath
@@ -211,7 +212,6 @@ class MementoModel(MLPrefetchModel):
         The return format for this function is a list of (instr_id, pf_addr)
         tuples as shown below
         '''
-        print('Generating for NextLineModel')
         prefetches = []
         for (instr_id, cycle_count, load_addr, load_ip, llc_hit) in data:
             # Prefetch the next two blocks
@@ -682,6 +682,131 @@ class BayesianModel(MLPrefetchModel):
             return raw
 
 # Replace this if you create your own model
+
+
+class BOMemento(BestOffset):
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.memento = MementoModel()
+
+    def train(self, data):
+        '''
+        Generate the prefetches for the prefetch file for ChampSim here
+
+        As a reminder, no looking ahead in the data and no more than 2
+        prefetches per unique instruction ID
+
+        The return format for this function is a list of (instr_id, pf_addr)
+        tuples as shown below
+        '''
+        print('Generating for BestOffset')
+        prefetches = []
+        prefetch_requests = []
+        memento_prefetch_requests = []
+        percent = len(data) // 100
+
+        bo_useful = defaultdict(set)
+        memento_useful = defaultdict(set)
+
+        train_memento_data = data[:len(data) // 2]
+        self.memento.train(train_memento_data)
+
+        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data[len(data) // 2:]):
+            hit, prefetched = self.llc.load(load_addr, False)
+            if hit and prefetched:
+                bo_useful[prefetched].add(load_addr)
+            memento_hit, memento_prefetched = self.memento.llc.load(load_addr, False)
+            if memento_hit and memento_prefetched:
+                memento_useful[memento_prefetched].add(load_addr)
+
+            # handle arrived prefetch requests for bo
+            while prefetch_requests and prefetch_requests[0][0] + self.memory_latency < cycle_count:
+                fill_addr = prefetch_requests[0][1]
+                h, p = self.llc.load(fill_addr, prefetch_requests[0][2])
+                if not h:
+                    if self.best_index == -1:
+                        fill_line_addr = fill_addr >> 6
+                        if self.best_index != -1:
+                            offset = self.offsets[self.best_index]
+                        else:
+                            offset = 0
+                        self.rr_add_immediate(fill_line_addr - offset)
+                prefetch_requests.pop(0)
+
+            # handle arrived prefetch requests for bo
+            while prefetch_requests and prefetch_requests[0][0] + self.memory_latency < cycle_count:
+                fill_addr = prefetch_requests[0][1]
+                h, p = self.llc.load(fill_addr, prefetch_requests[0][2])
+                if not h:
+                    if self.best_index == -1:
+                        fill_line_addr = fill_addr >> 6
+                        if self.best_index != -1:
+                            offset = self.offsets[self.best_index]
+                        else:
+                            offset = 0
+                        self.rr_add_immediate(fill_line_addr - offset)
+                prefetch_requests.pop(0)
+
+            # handle arrived memory accesses for memento
+            while memento_prefetch_requests and memento_prefetch_requests[0][0] + self.memory_latency < cycle_count:
+                fill_addr = memento_prefetch_requests[0][1]
+                h, p = self.memento.llc.load(fill_addr, True)
+                memento_prefetch_requests.pop(0)
+
+            self.rr_pop(cycle_count)
+            if not hit or prefetched:
+                line_addr = (load_addr >> 6)
+                self.train_bo(line_addr)
+                self.rr_add(cycle_count, line_addr)
+                if self.best_index != -1 and self.best_index_score > self.low_score:
+                    addr_1 = (line_addr + 1 * self.offsets[self.best_index]) << 6
+                    addr_2 = (line_addr + 2 * self.offsets[self.best_index]) << 6
+                    addr_2_alt = (line_addr + 1 * self.offsets[self.second_best_index]) << 6
+                    acc = len({addr_2 >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 25]))
+                    self.acc.append(acc)
+                    acc_alt = len({addr_2_alt >> 6, addr_1 >> 6} & set(d[2] >> 6 for d in data[i + 1: i + 25]))
+                    self.acc_alt.append(acc_alt)
+                    # if acc_alt > acc:
+                    #     addr_2 = addr_2_alt
+                    prefetches.append((instr_id, addr_1))
+                    prefetches.append((instr_id, addr_2))
+                    prefetch_requests.append((cycle_count, addr_1, instr_id))
+                    prefetch_requests.append((cycle_count, addr_2, instr_id))
+            else:
+                pass
+
+            # prefetch for memento
+            for iid, address in self.memento.generate([(instr_id, cycle_count, load_addr, load_ip, llc_hit)]):
+                memento_prefetch_requests.append((cycle_count, address, instr_id))
+
+            if i % percent == 0:
+                print(i // percent, self.active_offsets, self.best_index_score,
+                      sum(self.acc) / 2 / (len(self.acc) + 1),
+                      sum(self.acc_alt) / 2 / (len(self.acc_alt) + 1))
+                print('useful bo', len(bo_useful), 'memento', len(memento_useful))
+                self.acc.clear()
+                self.acc_alt.clear()
+                self.active_offsets.clear()
+
+        history = 4
+        classification_data = []
+        classification_labels = []
+        offset_history = []
+        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data[len(data) // 2:]):
+            offset_history.append(load_addr)
+            if len(offset_history) > history + 1:
+                offset_history.pop(0)
+            else:
+                continue
+            classification_data.append([offset_history[i] - offset_history[i - 1] for i in range(1, len(offset_history))])
+            if len(bo_useful[instr_id]) >= len(memento_useful[instr_id]):
+                classification_labels.append(1)
+            else:
+                classification_labels.append(0)
+
+        return prefetches
+
 
 ml_model_name = os.environ.get('ML_MODEL_NAME', 'TerribleMLModel')
 Model = eval(ml_model_name)
