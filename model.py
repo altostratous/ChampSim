@@ -444,6 +444,7 @@ class TerribleMLModel(MLPrefetchModel):
         for line in data:
             instr_id, cycles, load_address, ip, hit = line
             page = load_address >> 12
+            ippage = (ip, page)
             bucket_key = eval(self.bucket)
             bucket_buffer = bucket_data[bucket_key]
             bucket_buffer.append(load_address)
