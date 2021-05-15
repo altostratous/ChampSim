@@ -64,6 +64,26 @@ class CNN(nn.Module):
         return self.softmax(self.decoder(self.feature(input).view(-1, 50 * 8)))
 
 
+class MLP(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.feature = nn.Sequential(
+            nn.Linear(64, 57 * 8),
+            nn.ReLU(inplace=True),
+            nn.Linear(57 * 8, 50 * 8),
+            nn.ReLU(inplace=True),
+        )
+        self.decoder = nn.Sequential(
+            nn.Dropout(),
+            nn.Linear(8 * 50, 64),
+        )
+        self.softmax = nn.Softmax()
+
+    def forward(self, input):
+        return self.softmax(self.decoder(self.feature(input).view(-1, 50 * 8)))
+
+
 class Bayesian(nn.Module):
 
     def __init__(self):
@@ -395,17 +415,19 @@ class TerribleMLModel(MLPrefetchModel):
     """
 
     degree = 2
-    k = 2
-    history = 4
+    k = int(os.environ.get('CNN_K', '2'))
+    model_class = eval(os.environ.get('CNN_MODEL_CLASS', 'CNN'))
+    history = int(os.environ.get('CNN_HISTORY', '4'))
     lookahead = int(os.environ.get('LOOKAHEAD', '0'))
     bucket = os.environ.get('BUCKET', 'page')
     epochs = int(os.environ.get('EPOCHS', '10'))
+    lr = float(os.environ.get('CNN_LR', '0.01'))
     window = history + lookahead + k
     filter_window = lookahead * degree
     batch_size = 256
 
     def __init__(self):
-        self.model = CNN()
+        self.model = self.model_class()
 
     def load(self, path):
         self.model.load_state_dict(torch.load(path))
@@ -453,7 +475,7 @@ class TerribleMLModel(MLPrefetchModel):
     def train(self, data):
         print('LOOKAHEAD =', self.lookahead)
         print('BUCKET =', self.bucket)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         # defining the loss function
         # criterion = nn.CrossEntropyLoss()
         criterion = nn.BCELoss()
