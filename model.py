@@ -69,14 +69,14 @@ class MLP(nn.Module):
     def __init__(self):
         super().__init__()
         self.feature = nn.Sequential(
-            nn.Linear(64, 57 * 8),
+            nn.Linear(128, 57 * 8),
             nn.ReLU(inplace=True),
             nn.Linear(57 * 8, 50 * 8),
             nn.ReLU(inplace=True),
         )
         self.decoder = nn.Sequential(
             nn.Dropout(),
-            nn.Linear(8 * 50, 64),
+            nn.Linear(8 * 50, 128),
         )
         self.softmax = nn.Softmax()
 
@@ -416,14 +416,15 @@ class TerribleMLModel(MLPrefetchModel):
 
     degree = 2
     k = int(os.environ.get('CNN_K', '2'))
-    model_class = eval(os.environ.get('CNN_MODEL_CLASS', 'CNN'))
+    model_class = eval(os.environ.get('CNN_MODEL_CLASS', 'MLP'))
     history = int(os.environ.get('CNN_HISTORY', '4'))
-    lookahead = int(os.environ.get('LOOKAHEAD', '0'))
-    bucket = os.environ.get('BUCKET', 'page')
-    epochs = int(os.environ.get('EPOCHS', '10'))
-    lr = float(os.environ.get('CNN_LR', '0.01'))
+    lookahead = int(os.environ.get('LOOKAHEAD', '5'))
+    bucket = os.environ.get('BUCKET', 'ip')
+    epochs = int(os.environ.get('EPOCHS', '30'))
+    lr = float(os.environ.get('CNN_LR', '0.002'))
     window = history + lookahead + k
     filter_window = lookahead * degree
+    next_page_table = defaultdict(dict)
     batch_size = 256
 
     def __init__(self):
@@ -440,7 +441,7 @@ class TerribleMLModel(MLPrefetchModel):
             batch_size = self.batch_size
         bucket_data = defaultdict(list)
         bucket_instruction_ids = defaultdict(list)
-        batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
+        batch_instr_id, batch_page, batch_next_page, batch_x, batch_y = [], [], [], [], []
         for line in data:
             instr_id, cycles, load_address, ip, hit = line
             page = load_address >> 12
@@ -449,19 +450,25 @@ class TerribleMLModel(MLPrefetchModel):
             bucket_buffer = bucket_data[bucket_key]
             bucket_buffer.append(load_address)
             bucket_instruction_ids[bucket_key].append(instr_id)
-            if len(bucket_buffer) > self.window:
+            if len(bucket_buffer) >= self.window:
+                current_page = bucket_buffer[self.history - 1] >> 12
+                last_page = bucket_buffer[self.history - 2] >> 12
+                if last_page != current_page:
+                    self.next_page_table[ip][last_page] = current_page
                 batch_page.append(bucket_buffer[self.history - 1] >> 12)
-                batch_x.append(self.represent(bucket_buffer[:self.history]))
-                batch_y.append(self.represent(bucket_buffer[-self.k:], box=False))
+                batch_next_page.append(self.next_page_table[ip].get(current_page, current_page))
+                # TODO send transition information for labels to represent
+                batch_x.append(self.represent(bucket_buffer[:self.history], current_page))
+                batch_y.append(self.represent(bucket_buffer[-self.k:], current_page, box=False))
                 batch_instr_id.append(bucket_instruction_ids[bucket_key][self.history - 1])
                 bucket_buffer.pop(0)
                 bucket_instruction_ids[bucket_key].pop(0)
             if len(batch_x) == batch_size:
                 if torch.cuda.is_available():
-                    yield batch_instr_id, batch_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
+                    yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x).cuda(), torch.Tensor(batch_y).cuda()
                 else:
-                    yield batch_instr_id, batch_page, torch.Tensor(batch_x), torch.Tensor(batch_y)
-                batch_instr_id, batch_page, batch_x, batch_y = [], [], [], []
+                    yield batch_instr_id, batch_page, batch_next_page, torch.Tensor(batch_x), torch.Tensor(batch_y)
+                batch_instr_id, batch_page, batch_next_page, batch_x, batch_y = [], [], [], [], []
 
     def accuracy(self, output, label):
         return torch.sum(
@@ -491,7 +498,7 @@ class TerribleMLModel(MLPrefetchModel):
             accs = []
             losses = []
             percent = len(data) // self.batch_size // 100
-            for i, (instr_id, page, x_train, y_train) in enumerate(self.batch(data)):
+            for i, (instr_id, page, next_page, x_train, y_train) in enumerate(self.batch(data)):
                 # clearing the Gradients of the model parameters
                 optimizer.zero_grad()
 
@@ -518,9 +525,10 @@ class TerribleMLModel(MLPrefetchModel):
         self.model.eval()
         prefetches = []
         accs = []
-        for i, (instr_ids, pages, x, y) in enumerate(self.batch(data)):
+        for i, (instr_ids, pages, next_pages, x, y) in enumerate(self.batch(data)):
             # breakpoint()
             pages = torch.LongTensor(pages).to(x.device)
+            next_pages = torch.LongTensor(next_pages).to(x.device)
             instr_ids = torch.LongTensor(instr_ids).to(x.device)
             y_preds = self.model(x)
             accs.append(float(self.accuracy(y_preds, y)))
@@ -528,18 +536,24 @@ class TerribleMLModel(MLPrefetchModel):
             shape = (topk.shape[0] * self.degree,)
             topk = topk.reshape(shape)
             pages = torch.repeat_interleave(pages, self.degree)
+            next_pages = torch.repeat_interleave(next_pages, self.degree)
             instr_ids = torch.repeat_interleave(instr_ids, self.degree)
-            addresses = (pages << 12) + (topk << 6)
+            addresses = (topk < 64) * (pages << 12) + (topk >= 64) * ((next_pages << 12) - (64 << 6)) + (topk << 6)
+            #addresses = (pages << 12) + (topk << 6)
             prefetches.extend(zip(map(int, instr_ids), map(int, addresses)))
             if i % 100 == 0:
                 print('Chunk', i, 'Accuracy', sum(accs) / len(accs))
         return prefetches
 
-    def represent(self, addresses, box=True):
+    def represent(self, addresses, first_page, box=True):
         blocks = [(address >> 6) % 64 for address in addresses]
-        raw = [0 for _ in range(64)]
-        for block in blocks:
-            raw[block] = 1
+        pages = [(address >> 12) for address in addresses]
+        raw = [0 for _ in range(128)]
+        for i, block in enumerate(blocks):
+            if first_page == pages[i]:
+                raw[block] = 1
+            else:
+                raw[64 + block] = 1
         if box:
             return [raw]
         else:
