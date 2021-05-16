@@ -25,7 +25,7 @@ class CacheSimulator(object):
         tag = block >> self.way_shift
         return way, tag
 
-    def load(self, address, label=None):
+    def load(self, address, label=None, overwrite=False):
         way, tag = self.parse_address(address)
         hit, l = self.check(address)
         if not hit:
@@ -34,6 +34,8 @@ class CacheSimulator(object):
             if len(self.storage[way]) > self.sets:
                 self.storage[way].pop(0)
                 self.label_storage[way].pop(0)
+        if overwrite:
+            self.label_storage[way][self.storage[way].index(tag)] = label
         return hit, l
 
     def check(self, address):
@@ -518,8 +520,9 @@ class TerribleMLModel(MLPrefetchModel):
         self.model.eval()
         prefetches = []
         accs = []
+        percent = int(len(data) / self.batch_size / 100) + 1
         for i, (instr_ids, pages, x, y) in enumerate(self.batch(data)):
-            # breakpoint()
+            # breakpoint()100
             pages = torch.LongTensor(pages).to(x.device)
             instr_ids = torch.LongTensor(instr_ids).to(x.device)
             y_preds = self.model(x)
@@ -531,7 +534,7 @@ class TerribleMLModel(MLPrefetchModel):
             instr_ids = torch.repeat_interleave(instr_ids, self.degree)
             addresses = (pages << 12) + (topk << 6)
             prefetches.extend(zip(map(int, instr_ids), map(int, addresses)))
-            if i % 100 == 0:
+            if i % percent == 0:
                 print('Chunk', i, 'Accuracy', sum(accs) / len(accs))
         return prefetches
 
@@ -829,6 +832,88 @@ class BOMemento(BestOffset):
                 classification_labels.append(0)
 
         return prefetches
+
+
+class MultiSaturatingCounter:
+
+    def __init__(self, keys, limit=64) -> None:
+        super().__init__()
+        self.counters = {key: 0 for key in keys}
+        self.limit = limit
+
+    def promote(self, key):
+        self.counters[key] += len(self.counters)
+        for key in self.counters:
+            self.counters[key] -= 1
+        for key in self.counters:
+            if self.counters[key] < -self.limit:
+                self.counters[key] = -self.limit
+            if self.counters[key] > self.limit:
+                self.counters[key] = self.limit
+
+    @property
+    def best_order(self):
+        return [p for _, p in sorted([(v, k) for k, v in sorted(self.counters.items())], reverse=True)]
+
+
+class SetDueler(MLPrefetchModel):
+
+    prefetcher_classes = (BestOffset, TerribleMLModel)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prefetchers = [prefetcher_class() for prefetcher_class in self.prefetcher_classes]
+
+    def load(self, path):
+        pass
+
+    def save(self, path):
+        pass
+
+    def train(self, data):
+        # data = data[:len(data) // 5]
+        for prefetcher in self.prefetchers:
+            prefetcher.train(data)
+
+    def generate(self, data):
+        # data = data[:len(data) // 50]
+        prefetch_sets = []
+        memory_latency = 800
+        for prefetcher in self.prefetchers:
+            prefetch_sets.append(prefetcher.generate(data))
+            prefetch_sets[-1].sort()
+        cache_models = [CacheSimulator(16, 2048, 64) for _ in self.prefetchers]
+        total_prefetches = []
+        prefetch_iterators = [iter(prefetches) for prefetches in prefetch_sets]
+        prefetch_currents = [next(iterator, None) for iterator in prefetch_iterators]
+        prefetch_request_sets = {p: [] for p, _ in enumerate(self.prefetchers)}
+        counters = MultiSaturatingCounter(range(len(self.prefetchers)))
+        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data):
+
+            for p, _ in enumerate(self.prefetchers):
+                while prefetch_request_sets[p] and prefetch_request_sets[p][0][0] + memory_latency < cycle_count:
+                    cache_models[p].load(prefetch_request_sets[p][0][1], True)
+                    prefetch_request_sets[p].pop(0)
+
+            for p, _ in enumerate(self.prefetchers):
+                hit, prefetched = cache_models[p].load(load_addr, False, overwrite=True)
+                if prefetched:
+                    counters.promote(p)
+
+            candidates = defaultdict(list)
+            for p, prefetcher in enumerate(self.prefetchers):
+                while prefetch_currents[p] is not None and prefetch_currents[p][0] <= instr_id:
+                    if prefetch_currents[p][0] == instr_id:
+                        candidates[p].append(prefetch_currents[p])
+                    prefetch_currents[p] = next(prefetch_iterators[p], None)
+            instr_prefetches = []
+            for winner in counters.best_order:
+                instr_prefetches.extend(candidates[winner])
+                for iid, paddr in candidates[winner]:
+                    prefetch_request_sets[winner].append((cycle_count, paddr))
+            instr_prefetches = instr_prefetches[:2]
+            total_prefetches.extend(instr_prefetches)
+        return total_prefetches
 
 
 ml_model_name = os.environ.get('ML_MODEL_NAME', 'TerribleMLModel')
