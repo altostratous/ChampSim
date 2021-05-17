@@ -948,5 +948,45 @@ class SetDueler(MLPrefetchModel):
         return total_prefetches
 
 
+class Hybrid(MLPrefetchModel):
+
+    prefetcher_classes = (BestOffset,
+                          TerribleMLModel, )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prefetchers = [prefetcher_class() for prefetcher_class in self.prefetcher_classes]
+
+    def load(self, path):
+        pass
+
+    def save(self, path):
+        pass
+
+    def train(self, data):
+        for prefetcher in self.prefetchers:
+            prefetcher.train(data)
+
+    def generate(self, data):
+        data = data[len(data) // 50]
+        prefetch_sets = defaultdict(lambda: defaultdict(list))
+        for p, prefetcher in enumerate(self.prefetchers):
+            prefetches = prefetcher.generate(data)
+            for iid, addr in prefetches:
+                prefetch_sets[p][iid].append((iid, addr))
+        total_prefetches = []
+
+        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data):
+
+            instr_prefetches = []
+            for d in range(2):
+                for p in range(len(self.prefetchers)):
+                    if prefetch_sets[p][instr_id]:
+                        instr_prefetches.append(prefetch_sets[p][instr_id].pop(0))
+            instr_prefetches = instr_prefetches[:2]
+            total_prefetches.extend(instr_prefetches)
+        return total_prefetches
+
+
 ml_model_name = os.environ.get('ML_MODEL_NAME', 'TerribleMLModel')
 Model = eval(ml_model_name)
