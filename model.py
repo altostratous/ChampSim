@@ -9,15 +9,17 @@ import torch.nn as nn
 
 class CacheSimulator(object):
 
-    def __init__(self, sets, ways, block_size) -> None:
+    def __init__(self, sets, ways, block_size, eviction_hook=None, name=None) -> None:
         super().__init__()
         self.ways = ways
+        self.name = name
         self.way_shift = int(math.log2(ways))
         self.sets = sets
         self.block_size = block_size
         self.block_shift = int(math.log2(block_size))
         self.storage = defaultdict(list)
         self.label_storage = defaultdict(list)
+        self.eviction_hook = eviction_hook
 
     def parse_address(self, address):
         block = address >> self.block_shift
@@ -25,15 +27,24 @@ class CacheSimulator(object):
         tag = block >> self.way_shift
         return way, tag
 
-    def load(self, address, label=None):
+    def load(self, address, label=None, overwrite=False):
         way, tag = self.parse_address(address)
         hit, l = self.check(address)
         if not hit:
             self.storage[way].append(tag)
             self.label_storage[way].append(label)
             if len(self.storage[way]) > self.sets:
-                self.storage[way].pop(0)
-                self.label_storage[way].pop(0)
+                evicted_tag = self.storage[way].pop(0)
+                evicted_label = self.label_storage[way].pop(0)
+                if self.eviction_hook:
+                    self.eviction_hook(self.name, address, evicted_tag, evicted_label)
+        else:
+            current_index = self.storage[way].index(tag)
+            _t, _l = self.storage[way].pop(current_index), self.label_storage[way].pop(current_index)
+            self.storage[way].append(_t)
+            self.label_storage[way].append(_l)
+        if overwrite:
+            self.label_storage[way][self.storage[way].index(tag)] = label
         return hit, l
 
     def check(self, address):
@@ -525,6 +536,8 @@ class TerribleMLModel(MLPrefetchModel):
         self.model.eval()
         prefetches = []
         accs = []
+        order = {i: line[0] for i, line in enumerate(data)}
+        reverse_order = {v: k for k, v in order.items()}
         for i, (instr_ids, pages, next_pages, x, y) in enumerate(self.batch(data)):
             # breakpoint()
             pages = torch.LongTensor(pages).to(x.device)
@@ -543,6 +556,8 @@ class TerribleMLModel(MLPrefetchModel):
             prefetches.extend(zip(map(int, instr_ids), map(int, addresses)))
             if i % 100 == 0:
                 print('Chunk', i, 'Accuracy', sum(accs) / len(accs))
+        prefetches = sorted([(reverse_order[iid], iid, addr) for iid, addr in prefetches])
+        prefetches = [(iid, addr) for _, iid, addr in prefetches]
         return prefetches
 
     def represent(self, addresses, first_page, box=True):
@@ -843,6 +858,94 @@ class BOMemento(BestOffset):
                 classification_labels.append(0)
 
         return prefetches
+
+
+class MultiSaturatingCounter:
+
+    def __init__(self, keys, limit=64) -> None:
+        super().__init__()
+        self.counters = {key: 0 for key in keys}
+        self.limit = limit
+
+    def promote(self, key, factor=1):
+        self.counters[key] += factor * len(self.counters)
+        for key in self.counters:
+            self.counters[key] -= factor
+        for key in self.counters:
+            if self.counters[key] < -self.limit:
+                self.counters[key] = -self.limit
+            if self.counters[key] > self.limit:
+                self.counters[key] = self.limit
+
+    @property
+    def best_order(self):
+        return [-p for _, p in sorted([(v, -k) for k, v in self.counters.items()], reverse=True)]
+
+
+class SetDueler(MLPrefetchModel):
+
+    prefetcher_classes = (BestOffset,
+                          TerribleMLModel, )
+
+    demotion_factor = eval(os.environ.get('DUELER_DEMOTION_FACTOR', '1'))
+    promotion_factor = eval(os.environ.get('DUELER_PROMOTION_FACTOR', '0'))
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prefetchers = [prefetcher_class() for prefetcher_class in self.prefetcher_classes]
+
+    def load(self, path):
+        for prefetcher in self.prefetchers:
+            prefetcher.load(path)
+
+    def save(self, path):
+        for prefetcher in self.prefetchers:
+            prefetcher.save(path)
+
+    def train(self, data):
+        # data = data[:len(data) // 5]
+        for prefetcher in self.prefetchers:
+            prefetcher.train(data)
+
+    def generate(self, data):
+        # data = data[:len(data) // 50]
+        prefetch_sets = defaultdict(lambda: defaultdict(list))
+        memory_latency = 200
+        for p, prefetcher in enumerate(self.prefetchers):
+            prefetches = prefetcher.generate(data)
+            for iid, addr in prefetches:
+                prefetch_sets[p][iid].append((iid, addr))
+        total_prefetches = []
+        prefetch_request_sets = {p: [] for p, _ in enumerate(self.prefetchers)}
+        counters = MultiSaturatingCounter(range(len(self.prefetchers)))
+        cache_models = []
+
+        def demotion(cache_name, address, tag, label):
+            if label:
+                counters.promote(p, self.demotion_factor)
+        for p, _ in enumerate(self.prefetchers):
+            cache_models.append(CacheSimulator(16, 2048, 64, eviction_hook=demotion, name=p))
+        for i, (instr_id, cycle_count, load_addr, load_ip, llc_hit) in enumerate(data):
+
+            for p, _ in enumerate(self.prefetchers):
+                while prefetch_request_sets[p] and prefetch_request_sets[p][0][0] + memory_latency < cycle_count:
+                    h, l = cache_models[p].load(prefetch_request_sets[p][0][1], True)
+                    prefetch_request_sets[p].pop(0)
+
+            for p, _ in enumerate(self.prefetchers):
+                hit, prefetched = cache_models[p].load(load_addr, False, overwrite=True)
+                if prefetched:
+                    counters.promote(p, self.promotion_factor)
+            instr_prefetches = []
+            for winner in counters.best_order:
+                instr_prefetches.extend(prefetch_sets[winner][instr_id])
+                break
+            for winner in counters.best_order:
+                for iid, paddr in prefetch_sets[winner][instr_id]:
+                    prefetch_request_sets[winner].append((cycle_count, paddr))
+            instr_prefetches = instr_prefetches[:2]
+            total_prefetches.extend(instr_prefetches)
+        return total_prefetches
 
 
 ml_model_name = os.environ.get('ML_MODEL_NAME', 'TerribleMLModel')

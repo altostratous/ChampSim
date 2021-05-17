@@ -11,26 +11,36 @@ for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; 
     export CNN_LR=0.002
     export EPOCHS=30
 
-    for history in 4 8 16; do for bucket in ip; do for lookahead in 5 10 15; do for modelclass in MLP; do
+    for demotion in "0" "-1"; do for promotion in 4 1; do for history in 4; do for bucket in ip; do for lookahead in 5; do for modelclass in MLP; do
         export LOOKAHEAD=$lookahead
         export BUCKET=$bucket
         export CNN_MODEL_CLASS=$modelclass
         export CNN_HISTORY=$history
-        VARIATION="$LOOKAHEAD-$CNN_HISTORY"
-        GENERATED_DIR="generated-crosspage-$VARIATION"
+        export DUELER_DEMOTION_FACTOR=$demotion
+        export DUELER_PROMOTION_FACTOR=$promotion
+
+        VARIATION="$promotion-$demotion"
+        GENERATED_DIR="generated-dueler-$VARIATION"
+        WEIGHT_DIR="weights-dueler-$VARIATION"
         mkdir -p $GENERATED_DIR
+        mkdir -p $WEIGHT_DIR
         PREFETCH_FILE="$GENERATED_DIR/$b-$t.txt"
         PREFETCH_FILE=`echo $PREFETCH_FILE | sed 's/trace.gz/txt.xz/g'`
         PREFETCH_FILE=`echo $PREFETCH_FILE | sed 's/trace.xz/txt.xz/g'`
+
+        WEIGHT_FILE="$WEIGHT_DIR/$b-$t.pkl"
+        WEIGHT_FILE=`echo $WEIGHT_FILE | sed 's/trace.gz/txt.xz/g'`
+        WEIGHT_FILE=`echo $WEIGHT_FILE | sed 's/trace.xz/txt.xz/g'`
+
         # --gres=gpu:p100:1
-        TRAIN_COMMAND="sbatch --export=ALL --mem 10G --time 10:00:00 scripts/single.sh ./ml_prefetch_sim.py train $LOAD_TRACE_PATH --num-prefetch-warmup-instructions 100 --generate $PREFETCH_FILE"
+        TRAIN_COMMAND="sbatch --export=ALL --mem 10G --time 10:00:00 scripts/single.sh ./ml_prefetch_sim.py train $LOAD_TRACE_PATH --num-prefetch-warmup-instructions 100 --generate $PREFETCH_FILE --model $WEIGHT_FILE"
         echo $TRAIN_COMMAND
         JOB_ID=`$TRAIN_COMMAND`
         SUCCEEDED=$?
         if [[ $SUCCEEDED = 0 ]]; then
           JOB_ID=`echo $JOB_ID | awk '{print $4}'`
-          sbatch --dependency=afterok:$JOB_ID --export=ALL --mem 10G --time 10:00:00 scripts/single.sh ./ml_prefetch_sim.py run ML-DPC/ChampSimTraces/$b/$t --num-prefetch-warmup-instructions 100 --num-instructions 100 --results-dir="results-crosspage-$VARIATION" --prefetch $PREFETCH_FILE --no-base
+          sbatch --dependency=afterok:$JOB_ID --export=ALL --mem 10G --time 10:00:00 scripts/single.sh ./ml_prefetch_sim.py run ML-DPC/ChampSimTraces/$b/$t --num-prefetch-warmup-instructions 100 --num-instructions 100 --results-dir="results-dueler-$VARIATION" --prefetch $PREFETCH_FILE --no-base
         fi
         if [[ -f $TRACE_PATH ]] && [[ -f $LOAD_TRACE_PATH ]]; then echo OK; fi
-    done; done; done; done
+    done; done; done; done; done; done
 done; done
