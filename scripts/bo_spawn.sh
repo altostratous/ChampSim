@@ -7,11 +7,11 @@ for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; 
     export FUZZY_BO=True
     export BO_SCORE_SCALE=1
     export MEMENTO_DELAY=1
-    export ML_MODEL_NAME=TerribleMLModel
+    export ML_MODEL_NAME=Hybrid
     export CNN_LR=0.002
     export EPOCHS=30
 
-    for demotion in "0" "-1"; do for promotion in 4 1; do for history in 4; do for bucket in ip; do for lookahead in 5; do for modelclass in MLP; do
+    for demotion in "-1"; do for promotion in 1; do for history in 4; do for bucket in ip; do for lookahead in 5; do for modelclass in MLP; do
         export LOOKAHEAD=$lookahead
         export BUCKET=$bucket
         export CNN_MODEL_CLASS=$modelclass
@@ -20,8 +20,8 @@ for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; 
         export DUELER_PROMOTION_FACTOR=$promotion
 
         VARIATION="$promotion-$demotion"
-        GENERATED_DIR="generated-dueler-$VARIATION"
-        WEIGHT_DIR="weights-dueler-$VARIATION"
+        GENERATED_DIR="generated-hybrid-$VARIATION"
+        WEIGHT_DIR="weights-hybrid-$VARIATION"
         mkdir -p $GENERATED_DIR
         mkdir -p $WEIGHT_DIR
         PREFETCH_FILE="$GENERATED_DIR/$b-$t.txt"
@@ -39,7 +39,7 @@ for b in `ls ML-DPC/ChampSimTraces`; do for t in `ls ML-DPC/ChampSimTraces/$b`; 
         SUCCEEDED=$?
         if [[ $SUCCEEDED = 0 ]]; then
           JOB_ID=`echo $JOB_ID | awk '{print $4}'`
-          sbatch --dependency=afterok:$JOB_ID --export=ALL --mem 10G --time 10:00:00 scripts/single.sh ./ml_prefetch_sim.py run ML-DPC/ChampSimTraces/$b/$t --num-prefetch-warmup-instructions 100 --num-instructions 100 --results-dir="results-dueler-$VARIATION" --prefetch $PREFETCH_FILE --no-base
+          sbatch --dependency=afterok:$JOB_ID --export=ALL --mem 10G --time 10:00:00 scripts/single.sh ./ml_prefetch_sim.py run ML-DPC/ChampSimTraces/$b/$t --num-prefetch-warmup-instructions 100 --num-instructions 100 --results-dir="results-hybrid-$VARIATION" --prefetch $PREFETCH_FILE --no-base
         fi
         if [[ -f $TRACE_PATH ]] && [[ -f $LOAD_TRACE_PATH ]]; then echo OK; fi
     done; done; done; done; done; done

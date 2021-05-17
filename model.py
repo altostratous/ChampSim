@@ -968,7 +968,6 @@ class Hybrid(MLPrefetchModel):
             prefetcher.train(data)
 
     def generate(self, data):
-        data = data[len(data) // 50]
         prefetch_sets = defaultdict(lambda: defaultdict(list))
         for p, prefetcher in enumerate(self.prefetchers):
             prefetches = prefetcher.generate(data)
