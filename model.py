@@ -987,5 +987,5 @@ class Hybrid(MLPrefetchModel):
         return total_prefetches
 
 
-ml_model_name = os.environ.get('ML_MODEL_NAME', 'TerribleMLModel')
+ml_model_name = os.environ.get('ML_MODEL_NAME', 'Hybrid')
 Model = eval(ml_model_name)
